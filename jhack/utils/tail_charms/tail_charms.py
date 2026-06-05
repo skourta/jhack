@@ -1,5 +1,7 @@
+import os
 import re
 import select
+import stat as _stat
 import sys
 from pathlib import Path
 from typing import (
@@ -184,15 +186,24 @@ def _tail_charms(
             False  # it's too late for that, we're replaying the history and transforming it.
         )
 
-    # Only treat stdin as an input source when data is actually present.
-    # Checking isatty() alone is too broad: CI runners (e.g. GitHub Actions)
-    # connect stdin to an empty pipe, which is not a TTY but also carries no
-    # data. A regular file redirect is always ready; a FIFO is only ready when
-    # the writer has already queued bytes. Either way, select() with a zero
-    # timeout tells us whether there is something to read right now.
+    # Only treat stdin as an input source when it is a FIFO/regular-file AND
+    # has data actually available right now.
+    #
+    # Two failure modes to avoid:
+    #  1. /dev/null redirect  → char device; fstat rules it out before select.
+    #  2. CI empty pipe (e.g. GitHub Actions)  → IS a FIFO but the write end
+    #     is still open with no bytes queued; select(0) returns not-readable.
+    #
+    # Real piped input (e.g. `cat juju.log | jhack tail`) satisfies both:
+    # it IS a FIFO, and bytes are already buffered when we check.
     try:
-        _readable, _, _ = select.select([sys.stdin], [], [], 0)
-        read_from_stdin = bool(_readable) and not sys.stdin.isatty()
+        _stdin_mode = os.fstat(sys.stdin.fileno()).st_mode
+        _is_piped_or_file = _stat.S_ISFIFO(_stdin_mode) or _stat.S_ISREG(_stdin_mode)
+        if _is_piped_or_file:
+            _readable, _, _ = select.select([sys.stdin], [], [], 0)
+            read_from_stdin = bool(_readable)
+        else:
+            read_from_stdin = False
     except (OSError, ValueError):
         read_from_stdin = False
 
