@@ -1,6 +1,5 @@
-import os
 import re
-import stat as _stat
+import select
 import sys
 from pathlib import Path
 from typing import (
@@ -185,11 +184,17 @@ def _tail_charms(
             False  # it's too late for that, we're replaying the history and transforming it.
         )
 
-    # Only treat stdin as an input source when it is an actual pipe or file.
-    # A bare non-TTY context (e.g. GitHub Actions, /dev/null redirect) is a
-    # character device, not a FIFO, so it should not be mistaken for piped input.
-    _stdin_mode = os.fstat(sys.stdin.fileno()).st_mode
-    read_from_stdin = _stat.S_ISFIFO(_stdin_mode) or _stat.S_ISREG(_stdin_mode)
+    # Only treat stdin as an input source when data is actually present.
+    # Checking isatty() alone is too broad: CI runners (e.g. GitHub Actions)
+    # connect stdin to an empty pipe, which is not a TTY but also carries no
+    # data. A regular file redirect is always ready; a FIFO is only ready when
+    # the writer has already queued bytes. Either way, select() with a zero
+    # timeout tells us whether there is something to read right now.
+    try:
+        _readable, _, _ = select.select([sys.stdin], [], [], 0)
+        read_from_stdin = bool(_readable) and not sys.stdin.isatty()
+    except (OSError, ValueError):
+        read_from_stdin = False
 
     if (read_from_stdin or files) and auto_bump_loglevel:
         logger.debug("static input mode. Overriding auto loglevel bumping.")
